@@ -6,6 +6,10 @@ module it;
 public import unit_threaded;
 import unit_threaded.integration;
 
+version(Windows)
+        enum objectFileExtension = ".obj";
+else
+        enum objectFileExtension = ".o";
 
 version(dpp2)
     alias WIP2 = ShouldFail;
@@ -62,11 +66,14 @@ struct IncludeSandbox {
         import dpp.runtime.app: dppRun = run;
         import std.algorithm: map;
         import std.array: array;
+        import std.process: environment;
 
         const baseLineArgs = [
             "d++",
             "--include-path",
-            sandboxPath
+            sandboxPath,
+            "--compiler",
+            environment.get("DC", "dmd"),
         ];
         auto options = Options(baseLineArgs ~ args);
         options.dppFileNames[] = options.dppFileNames.map!(a => sandbox.inSandboxPath(a)).array;
@@ -76,6 +83,14 @@ struct IncludeSandbox {
 
     void runPreprocessOnly(in string[] args...) @safe const {
         run(["--preprocess-only", "--keep-pre-cpp-files"] ~ args);
+        version(Windows) {
+            // Windows tests would sometimes fail saying the D modules
+            // don't exist... I didn't prove it, but my suspicion is
+            // just an async write hasn't completed yet. This sleep, while
+            // a filthy hack, worked consistently for me.
+            import core.thread : Thread, msecs;
+            () @trusted { Thread.sleep(500.msecs); }();
+        }
     }
 
     void shouldCompile(string file = __FILE__, size_t line = __LINE__)
@@ -83,7 +98,7 @@ struct IncludeSandbox {
         @safe const
     {
         try
-            sandbox.shouldSucceed!(file, line)([dCompiler, "-o-", "-c"] ~ srcFiles);
+            sandbox.shouldSucceed!(file, line)([dCompiler, "-m64", "-o-", "-c"] ~ srcFiles);
         catch(Exception e)
             adjustMessage(e, srcFiles);
     }
@@ -93,7 +108,7 @@ struct IncludeSandbox {
         @safe const
     {
         try
-            sandbox.shouldFail!(file, line)([dCompiler, "-o-", "-c"] ~ srcFiles);
+            sandbox.shouldFail!(file, line)([dCompiler, "-m64", "-o-", "-c"] ~ srcFiles);
         catch(Exception e)
             adjustMessage(e, srcFiles);
     }
@@ -103,11 +118,11 @@ struct IncludeSandbox {
         @safe const
     {
         try
-            sandbox.shouldSucceed!(file, line)([dCompiler, "-c", "-ofblob.o"] ~ srcFiles);
+            sandbox.shouldSucceed!(file, line)([dCompiler, "-c", "-ofblob" ~ objectFileExtension] ~ srcFiles);
         catch(Exception e)
             adjustMessage(e, srcFiles);
 
-        shouldFail(dCompiler, "-ofblob", "blob.o");
+        shouldFail(dCompiler, "-ofblob", "blob" ~ objectFileExtension);
     }
 
     private void adjustMessage(Exception e, in string[] srcFiles) @safe const {
@@ -248,18 +263,23 @@ private void shouldCompileAndRun
             else
                 return isCpp ? "g++" : "gcc";
         }();
-        const compilerVersion = environment.get("TRAVIS", "") == "" ? "" : "-7";
-        const compiler = compilerName ~ compilerVersion;
+        const compiler = compilerName;
         const languageStandard =  isCpp ? "-std=c++17" : "-std=c11";
+        const outputFileName = "c" ~ objectFileExtension;
 
-        shouldSucceed(compiler, "-o", "c.o", "-g", languageStandard, "-c", cSourceFileName);
+        shouldSucceed(compiler, "-o", outputFileName, "-g", languageStandard, "-c", cSourceFileName);
+        shouldExist(outputFileName);
 
         runPreprocessOnly("app.dpp");
 
-        const linkStdLib = isCpp ? ["-L-lstdc++"] : [];
+        version(Windows)
+            // stdc++ is GNU-speak, on Windows, it uses the Microsoft lib
+            const string[] linkStdLib = [];
+        else
+            const linkStdLib = isCpp ? ["-L-lstdc++"] : [];
 
         try
-            shouldSucceed!(file, line)([dCompiler, "-g", "app.d", "c.o"] ~ linkStdLib);
+            shouldSucceed!(file, line)([dCompiler, "-m64", "-g", "app.d", "c" ~ objectFileExtension] ~ linkStdLib);
         catch(Exception e)
             adjustMessage(e, ["app.d"]);
 

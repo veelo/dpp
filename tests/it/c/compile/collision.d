@@ -167,3 +167,87 @@ import it;
         ),
     );
 }
+
+@Tags("collision")
+@("struct module and void module() should be renamed differently")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct module;
+                void module(struct module const * const ptr);
+                struct module { struct module *module_; };
+            }
+        ),
+        D(
+            q{
+                module_ md;
+                md.module__ = &md;
+                module__(md.module__);
+            }
+        ),
+    );
+}
+
+@Tags("collision")
+@("Accessors for members of anonymous records are renamed")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct A {
+                    union {
+                        unsigned int version;
+                        char module;
+                    };
+                    int a;
+                };
+            }
+        ),
+        D(
+            q{
+                A a;
+                a.version_ = 7;
+                a.module_ = 'D';
+            }
+        ),
+    );
+}
+
+@Tags("collision")
+@("Members (pointers to struct) in multiple (possibly anon) structures")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct A;
+
+                struct B {
+                    struct A *A;
+                };
+
+                struct C {
+                    struct A* A;
+                };
+
+                struct D {
+                    union {
+                        struct A* A;
+                        int d;
+                    };
+                };
+            }
+        ),
+        D(
+            q{
+                A *a;
+                B b;
+                b.A_ = a;
+                C c;
+                c.A_ = a;
+                D d;
+                d.A_ = a;
+            }
+        ),
+    );
+}

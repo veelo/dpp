@@ -24,15 +24,20 @@ struct Context {
 
     import dpp.runtime.options: Options;
     import clang: Cursor, Type, AccessSpecifier;
+    import std.array: Appender;
 
     alias SeenCursors = bool[CursorId];
+
+    private auto lines(this This)() {
+        return _lines.data;
+    }
 
     /**
        The lines of output so far. This is needed in order to fix
        any name collisions between functions or variables with aggregates
        such as structs, unions and enums.
      */
-    private string[] lines;
+    private Appender!(string[]) _lines;
 
     /**
        Structs can be anonymous in C, and it's even common
@@ -52,12 +57,30 @@ struct Context {
        Remembers the field spellings in aggregates in case we need to change any
        of them.
      */
-    private LineNumber[string] _fieldDeclarations;
+    private LineNumber[][string] _fieldDeclarations;
 
     /**
        All the aggregates that have been declared
      */
     private bool[string] _aggregateDeclarations;
+
+    /**
+      Mapping between the original aggregate spelling and the renamed one,
+      if renaming was necessary.
+     */
+    private string[string] _aggregateSpelling;
+
+    /**
+      Mapping between a child aggregate's name and its parent aggregate's
+      name.
+     */
+    private string[string] _aggregateParents;
+
+    /**
+      Mapping between a line number and an array of strings representing all
+      the aggregate types' names contained at that index.
+     */
+    private string[][LineNumber] _aggregateTypeLines;
 
     /**
        A linkable is a function or a global variable.  We remember all
@@ -90,12 +113,7 @@ struct Context {
     /*
       Remember all declared types so that C-style casts can be recognised
      */
-    private string[] _types = [
-        `void ?\*`,
-        `char`, `unsigned char`, `signed char`, `short`, `unsigned short`,
-        `int`, `unsigned`, `unsigned int`, `long`, `unsigned long`, `long long`,
-        `unsigned long long`, `float`, `double`, `long double`,
-    ];
+    private string[] _types;
 
     /// to generate unique names
     private int _anonymousIndex;
@@ -110,26 +128,21 @@ struct Context {
     }
 
     ref Context indent() @safe pure return {
-        options = options.indent;
+        options.indent;
         return this;
     }
 
-    string indentation() @safe @nogc pure const {
+    auto indentation() @safe @nogc pure const {
         return options.indentation;
     }
 
-    void setIndentation(in string indentation) @safe pure {
+    void setIndentation(in int indentation) @safe pure {
         options.indentation = indentation;
     }
 
     void log(A...)(auto ref A args) const {
         import std.functional: forward;
         options.log(forward!args);
-    }
-
-    void indentLog(A...)(auto ref A args) const {
-        import std.functional: forward;
-        options.indent.log(forward!args);
     }
 
     bool debugOutput() @safe @nogc pure nothrow const {
@@ -152,12 +165,18 @@ struct Context {
         return lines.join("\n");
     }
 
+    /**
+       Writes a line of translation.
+     */
     void writeln(in string line) @safe pure nothrow {
-        lines ~= line.dup;
+        _lines ~= line;
     }
 
+    /**
+       Writes lines of translation.
+    */
     void writeln(in string[] lines) @safe pure nothrow {
-        this.lines ~= lines;
+        _lines ~= lines;
     }
 
     // remember a function or variable declaration
@@ -172,9 +191,11 @@ struct Context {
         return spelling;
     }
 
-    void fixNames() @safe pure {
+    void fixNames() @safe {
         declareUnknownStructs;
         fixLinkables;
+        if (language == Language.C)
+            fixAggregateTypes;
         fixFields;
     }
 
@@ -195,10 +216,63 @@ struct Context {
         import dpp.translation.dlang: pragmaMangle, rename;
         import std.string: replace;
 
-        foreach(spelling, lineNumber; _fieldDeclarations) {
-            if(spelling in _aggregateDeclarations) {
+        foreach(spelling, lineNumbers; _fieldDeclarations) {
+            if(spelling in _aggregateDeclarations || spelling in _aggregateSpelling) {
+                const actual = spelling in _aggregateSpelling
+                                            ? _aggregateSpelling[spelling]
+                                            : spelling;
+                const renamed = rename(actual, this);
+                foreach (lineNumber; lineNumbers) {
+                    lines[lineNumber] = lines[lineNumber]
+                        // Member declaration
+                        .replace(" " ~ actual ~ `;`, " " ~ renamed ~ `;`)
+                        // Pointer declaration
+                        .replace(" *" ~ actual ~ `;`, " *" ~ renamed ~ `;`)
+                        // Accessing member in getter (C11 anon records)
+                        .replace("." ~ actual ~ ";", "." ~ renamed ~ ";")
+                        // Accessing member in setter (C11 anon records)
+                        .replace("." ~ actual ~ " =", "." ~ renamed ~ " =")
+                        // Getter function name (C11 anon records)
+                        .replace("auto " ~ actual ~ "()", "auto " ~ renamed ~ "()")
+                        // Setter function name (C11 anon records)
+                        .replace("void " ~ actual ~ "(_T_)", "void " ~ renamed ~ "(_T_)");
+                }
+            }
+        }
+    }
+
+    void fixAggregateTypes() @safe pure {
+        import dpp.translation.type : removeDppDecorators;
+        import std.array : join;
+        import std.algorithm : reverse;
+        import std.string : replace;
+
+        string aggregateTypeName(in string spelling) @safe pure {
+            if (spelling !in _aggregateParents)
+                return spelling;
+
+            string[] elems;
+            elems ~= spelling;
+            string curr = _aggregateParents[spelling];
+
+            while (curr in _aggregateParents) {
+                elems ~= curr ~ ".";
+                curr = _aggregateParents[curr];
+            }
+
+            elems ~= curr ~ ".";
+
+            return elems.reverse.join;
+        }
+
+        foreach (elem; _aggregateTypeLines.byKeyValue) {
+            LineNumber lineNumber = elem.key;
+            string[] aggregateTypeNames = elem.value;
+
+            foreach (name; aggregateTypeNames) {
+                const actualName = aggregateTypeName(name);
                 lines[lineNumber] = lines[lineNumber]
-                    .replace(spelling ~ `;`, rename(spelling, this) ~ `;`);
+                    .replace("__dpp_aggregate__ " ~ name, actualName);
             }
         }
     }
@@ -221,17 +295,44 @@ struct Context {
        In C it's possible for a struct field name to have the same name as a struct
        because of elaborated names. We remember them here in case we need to fix them.
      */
-    void rememberField(in string spelling) @safe pure {
-        _fieldDeclarations[spelling] = lines.length;
+    void rememberField(scope const string spelling) @safe pure {
+        _fieldDeclarations[spelling] ~= lines.length;
     }
 
     /**
        Remember this aggregate cursor
      */
     void rememberAggregate(in Cursor cursor) @safe pure {
+        const spelling = resolveSpelling(cursor);
+        rememberType(spelling);
+    }
+
+    void rememberAggregateParent(in Cursor child, in Cursor parent) @safe pure {
+        const parentSpelling = spelling(parent.spelling);
+        const childSpelling = resolveSpelling(child);
+        _aggregateParents[childSpelling] = parentSpelling;
+    }
+
+    void rememberAggregateTypeLine(in string typeName) @safe pure {
+        _aggregateTypeLines[lines.length] ~= typeName;
+    }
+
+    private string resolveSpelling(in Cursor cursor) @safe pure {
         const spelling = spellingOrNickname(cursor);
         _aggregateDeclarations[spelling] = true;
-        rememberType(spelling);
+        rememberSpelling(cursor.spelling, spelling);
+        return spelling;
+    }
+
+    void rememberSpelling(scope const string original, in string spelling) @safe pure {
+        if (original != "" && original != spelling)
+            _aggregateSpelling[original] = spelling;
+    }
+
+    bool isUnknownStruct(in string name) @safe pure const {
+        return name !in _aggregateDeclarations
+            && (name !in _aggregateSpelling
+                || _aggregateSpelling[name] !in _aggregateDeclarations);
     }
 
     /**
@@ -239,12 +340,17 @@ struct Context {
         define them now so the D file can compile
         See `it.c.compile.delayed`.
     */
-    void declareUnknownStructs() @safe pure {
+    void declareUnknownStructs() @safe {
+        import dpp.translation.type : removeDppDecorators;
+
         foreach(name, _; _fieldStructSpellings) {
-            if(name !in _aggregateDeclarations) {
+            name = name.removeDppDecorators;
+            if(isUnknownStruct(name)) {
                 log("Could not find '", name, "' in aggregate declarations, defining it");
-                writeln("struct " ~ name ~ ";");
-                _aggregateDeclarations[name] = true;
+                const spelling = name in _aggregateSpelling ? _aggregateSpelling[name]
+                                                            : name;
+                writeln("struct " ~ spelling ~ ";");
+                _aggregateDeclarations[spelling] = true;
             }
         }
     }
@@ -255,9 +361,20 @@ struct Context {
 
     /// return the spelling if it exists, or our made-up nickname for it if not
     string spellingOrNickname(in Cursor cursor) @safe pure {
+        if (cursor.spelling == "")
+            return nickName(cursor);
+
+        return spelling(cursor.spelling);
+    }
+
+    string spelling(scope const string cursorSpelling) @safe pure {
         import dpp.translation.dlang: rename, isKeyword;
-        if(cursor.spelling == "") return nickName(cursor);
-        return cursor.spelling.isKeyword ? rename(cursor.spelling, this) : cursor.spelling;
+
+        if (cursorSpelling in _aggregateSpelling)
+            return _aggregateSpelling[cursorSpelling];
+
+        return cursorSpelling.isKeyword ? rename(cursorSpelling, this)
+                                        : cursorSpelling.idup;
     }
 
     private string nickName(in Cursor cursor) @safe pure {
@@ -297,32 +414,15 @@ struct Context {
         _types ~= type;
     }
 
-    /// Matches a C-type cast
-    auto castRegex() @safe const {
-        import std.array: join, array;
-        import std.regex: regex;
-        import std.algorithm: map;
-        import std.range: chain;
-
-        // const and non const versions of each type
-        const typesConstOpt = _types.map!(a => `(?:const )?` ~ a).array;
-
-        const typeSelectionStr =
-            chain(typesConstOpt,
-                  // pointers thereof
-                  typesConstOpt.map!(a => a ~ ` ?\*`))
-            .join("|");
-
-        // parens and a type inside, where "a type" is any we know about
-        const regexStr = `\(( *?(?:` ~ typeSelectionStr ~ `) *?)\)`;
-
-        return regex(regexStr);
+    bool isUserDefinedType(in string spelling) @safe pure const {
+        import std.algorithm: canFind;
+        return _types.canFind(spelling);
     }
 
     void rememberMacro(in Cursor cursor) @safe pure {
-        _macros[cursor.spelling] = true;
+        _macros[cursor.spelling.idup] = true;
         if(cursor.isMacroFunction)
-            _functionMacroDeclarations[cursor.spelling] = true;
+            _functionMacroDeclarations[cursor.spelling.idup] = true;
     }
 
     bool macroAlreadyDefined(in Cursor cursor) @safe pure const {
@@ -349,6 +449,14 @@ struct Context {
         import std.algorithm: canFind, any;
         return options.ignoredNamespaces.any!(a => type.spelling.canFind(a ~ "::"));
     }
+
+    /// Is the file from an ignored path? Note it uses file globbing
+    bool isFromIgnoredPath(in Cursor cursor) @safe const {
+        import std.path: globMatch;
+        import std.algorithm: any;
+        string sourcePath = cursor.sourceRange.path;
+        return options.ignoredPaths.any!(a => sourcePath.globMatch(a));
+    }
 }
 
 
@@ -362,9 +470,9 @@ private struct CursorId {
     Type.Kind typeKind;
 
     this(in Cursor cursor) @safe pure nothrow {
-        cursorSpelling = cursor.spelling;
+        cursorSpelling = cursor.spelling.idup;
         cursorKind = cursor.kind;
-        typeSpelling = cursor.type.spelling;
+        typeSpelling = cursor.type.spelling.idup;
         typeKind = cursor.type.kind;
     }
 }

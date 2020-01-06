@@ -1,6 +1,8 @@
 module it.c.compile.preprocessor;
 
+
 import it;
+
 
 @("simple macro")
 @safe unittest {
@@ -76,4 +78,55 @@ import it;
         )
     );
 
+}
+
+
+@("elaborate")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                struct Foo {};
+                #define STRUCT_HEAD \
+                    int count; \
+                    struct Foo *foo;
+            `
+        ),
+        D(
+            q{
+                static struct Derived {
+                    STRUCT_HEAD
+                }
+
+                auto d = Derived();
+                d.count = 42;
+                d.foo = null;
+            }
+        )
+    );
+}
+
+
+version(Posix)  // FIXME
+@("multiline")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                // WARNING: don't attempt to tidy up the formatting here or the
+                // test is actually changed
+#define void_to_int_ptr(x) ( \
+    (int *) x \
+)
+            `
+        ),
+        D(
+            q{
+                import std.stdio: writeln;
+                int a = 7;
+                void *p = &a;
+                auto intPtr = void_to_int_ptr(p);
+            }
+        )
+    );
 }

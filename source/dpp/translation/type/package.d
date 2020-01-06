@@ -28,14 +28,21 @@ string translate(in from!"clang".Type type,
     if(type.kind !in translators)
         throw new UntranslatableException(text("Type kind ", type.kind, " not supported: ", type));
 
-    const translation =  translators[type.kind](type, context, translatingFunction);
+    const translation = translators[type.kind](type, context, translatingFunction);
 
     // hack for std::function since function is a D keyword
     return translation.replace(`function!`, `function_!`);
 }
 
 
-Translators translators() @safe {
+private Translators translators() @safe {
+    static Translators ret;
+    if(ret == ret.init) ret = translatorsImpl;
+    return ret;
+}
+
+
+private Translators translatorsImpl() @safe pure {
     import clang: Type;
 
     with(Type.Kind) {
@@ -147,23 +154,50 @@ private string translateAggregate(in from!"clang".Type type,
 
             const ns = type.declaration.namespace;
             // no namespace, no problem
-            if(ns.isInvalid) return type.spelling;
+            if(ns.isInvalid) {
+                import std.array : split;
+
+                string[] elems = type.spelling.split(" ");
+                string typeName = elems[$ - 1];
+                string spelling = context.spelling(typeName);
+                context.rememberSpelling(typeName, spelling);
+                elems[$ - 1] = spelling;
+                return elems.join(" ");
+            }
 
             // look for the namespace name in the declaration
             const startOfNsIndex = type.spelling.countUntil(ns.spelling);
+
+            // The namespace spelling is always what's considered the namespace in the FQN.
+            // The spelling we get from the cursor itself might not contain this namespace
+            // spelling if there's an alias.
+            // See it.cpp.opaque.paramater.exception_ptr
+            const hiddenNS = !type.spelling.canFind(ns.spelling);
+
             if(startOfNsIndex != -1) {
                 // +2 due to `::`
                 const endOfNsIndex = startOfNsIndex + ns.spelling.length + 2;
                 // "subtract" the namespace away
                 return type.spelling[endOfNsIndex .. $];
-            } else {
+            } else if(hiddenNS) {
+                // this block deals with cases where there's a name alias
+                // and the NS doesn't show up how it's spelt but does show up
+                // in the FQN.
+                // See it.cpp.opaque.paramater.exception_ptr
                 const noNs = type.declaration.typeNameNoNs;
                 const endOfNsIndex = type.spelling.countUntil(noNs);
+
                 if(endOfNsIndex == -1)
-                    throw new Exception("Could not find '" ~ noNs ~ "' in '" ~ type.spelling ~ "'");
+                    throw new Exception("Could not find namespaceless '" ~ noNs ~ "' in type '" ~ type.spelling ~ "'");
                 return type.spelling[endOfNsIndex .. $];
+            } else {
+                return type.spelling;
             }
-        }().replace("::", ".");
+        }()
+         // FIXME - why doesn't `translateString` work here?
+         .replace("::", ".")
+         .replace("typename ", "")
+         ;
 
         // Clang template types have a spelling such as `Foo<unsigned int, unsigned short>`.
         // We need to extract the "base" name (e.g. Foo above) then translate each type
@@ -195,7 +229,7 @@ private string translateAggregate(in from!"clang".Type type,
     }
 
     return addModifiers(type, spelling)
-        .translateElaborated
+        .translateElaborated(context)
         .replace("<", "!(")
         .replace(">", ")")
         ;
@@ -307,10 +341,20 @@ private string translatePointer(in from!"clang".Type type,
         return true;
     }
 
-    const ptrType = addConst
-        ? `const(` ~ rawType ~ maybeStar ~ `)`
-        : rawType ~ maybeStar;
+    version(Windows) {
+        // Microsoft extension for pointers that doesn't compile
+        // elsewhere. It tells the pointer may point to an unaligned
+        // structure, for platforms where that is an optimization. Just
+        // ignoring so it works here.
+        import std.string;
+        auto typePart = replace(rawType, "__unaligned ", "");
+    } else {
+        auto typePart = rawType;
+   }
 
+    const ptrType = addConst
+        ? `const(` ~ typePart ~ maybeStar ~ `)`
+        : typePart ~ maybeStar;
     return ptrType;
 }
 
@@ -387,15 +431,20 @@ private string translateUnexposed(in from!"clang".Type type,
     import std.string: replace;
     import std.algorithm: canFind;
 
-    if(type.canonical.kind == Type.Kind.Record)
-        return translateAggregate(type.canonical, context, translatingFunction);
+    const canonical = type.canonical;
 
+    // Deal with kinds we know how to deal with here
+    if(canonical.kind != Type.Kind.Unexposed)
+        return translate(canonical, context, translatingFunction);
+
+    // FIXME: there should be a better way
     const spelling = type.spelling.canFind(" &&...")
         ? "auto ref " ~ type.spelling.replace(" &&...", "")
         : type.spelling;
 
     const translation =  translateString(spelling, context)
-        // we might get template arguments here (e.g. `type-parameter-0-0`)
+        // We might get template arguments here (e.g. `type-parameter-0-0`)
+        // FIXME: this is a hack to get around libclang
         .replace("type-parameter-0-", "type_parameter_0_")
         ;
 
@@ -405,7 +454,7 @@ private string translateUnexposed(in from!"clang".Type type,
 /**
    Translate possibly problematic C++ spellings
  */
-string translateString(in string spelling,
+string translateString(scope const string spelling,
                        in from!"dpp.runtime.context".Context context)
     @safe nothrow
 {
@@ -435,14 +484,41 @@ string translateString(in string spelling,
         ;
 }
 
+string removeDppDecorators(in string spelling) @safe {
+    import std.string : replace;
+    return spelling.replace("__dpp_aggregate__ ", "");
+}
 
 // "struct Foo" -> Foo, "union Foo" -> Foo, "enum Foo" -> Foo
-string translateElaborated(in string spelling) @safe nothrow {
+string translateElaborated(const scope string spelling,
+                           ref from!"dpp.runtime.context".Context context) @safe {
+    import dpp.runtime.context: Language;
     import std.array: replace;
+    import std.algorithm : find;
+    import std.string : split;
+    import std.range.primitives;
+
+    void remember(in string recordType) @safe pure {
+        // '(' and ')' because of the "const(...)" modifier
+        string[] name = spelling.split!(a => a == '(' || a == ')' || a == ' ').find(recordType);
+        while (!name.empty) {
+            context.rememberAggregateTypeLine(name[1]);
+            name = name[1..$-1].find(recordType);
+        }
+    }
+
+    const rep = context.language == Language.C ? "__dpp_aggregate__ " : "";
+
+    if (context.language == Language.C) {
+        remember("struct");
+        remember("union");
+        remember("enum");
+    }
+
     return spelling
-        .replace("struct ", "")
-        .replace("union ", "")
-        .replace("enum ", "")
+        .replace("struct ", rep)
+        .replace("union ", rep)
+        .replace("enum ", rep)
     ;
 }
 
@@ -453,16 +529,17 @@ private string translateSimdVector(in from!"clang".Type type,
 {
     import std.conv: text;
     import std.algorithm: canFind;
+    import std.string: replace;
 
     const numBytes = type.numElements;
     const dtype =
-        translate(type.elementType, context, translatingFunction) ~
-        text(type.getSizeof / numBytes);
+        translate(type.elementType, context, translatingFunction).replace("c_", "") ~
+        text(numBytes);
 
     const isUnsupportedType =
         [
-            "long8", "short2", "char1", "double8", "ubyte1", "ushort2",
-            "ulong8", "byte1",
+            "long1", "char8", "short4", "ubyte8", "byte8", "ushort4", "short4",
+            "uint2", "int2", "ulong1", "float2", "char16",
         ].canFind(dtype);
 
     return isUnsupportedType ? "int /* FIXME: unsupported SIMD type */" : "core.simd." ~ dtype;

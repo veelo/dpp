@@ -77,12 +77,13 @@ private struct CppBoilerplateCode {
     static void compileSrcFile() @safe {
         import std.process: execute;
         import std.file: exists;
+        import std.exception: enforce;
 
         const args = ["-c", srcFileName];
         const gccArgs = "g++" ~ args;
         const clangArgs = "clang++" ~ args;
 
-        scope(success) assert(exists(objFileName), objFileName ~ " was expected to exist but did not");
+        scope(success) enforce(objFileName.exists, objFileName ~ " was expected to exist but did not");
 
         const gccRet = execute(gccArgs);
         if(gccRet.status == 0) return;
@@ -102,6 +103,8 @@ private struct CppBoilerplateCode {
 
    Params:
         options = The runtime options.
+        inputFileName = the name of the file to read
+        outputFileName = the name of the file to write
  */
 void preprocess(File)(in from!"dpp.runtime.options".Options options,
                       in string inputFileName,
@@ -117,6 +120,8 @@ void preprocess(File)(in from!"dpp.runtime.options".Options options,
 
         const translationText = translationText!File(options, inputFileName);
 
+        writeUndefLines(inputFileName, outputFile);
+
         outputFile.writeln(translationText.moduleDeclaration);
         outputFile.writeln(preamble);
         outputFile.writeln(translationText.dlangDeclarations);
@@ -125,7 +130,7 @@ void preprocess(File)(in from!"dpp.runtime.options".Options options,
         writeDlangLines(inputFileName, outputFile);
     }
 
-    runCPreProcessor(tmpFileName, outputFileName);
+    runCPreProcessor(options.cppPath, tmpFileName, outputFileName);
 }
 
 private struct TranslationText {
@@ -143,12 +148,12 @@ private TranslationText translationText(File)(in from!"dpp.runtime.options".Opti
         import dpp2.expansion: expand, isCppHeader, getHeaderName;
     else
         import dpp.expansion: expand, isCppHeader, getHeaderName;
+    import clang.util: getTempFileName;
 
     import std.algorithm: map, filter;
     import std.string: fromStringz;
     import std.path: dirName;
     import std.array: array, join;
-    import core.stdc.stdio: tmpnam;
 
     auto inputFile = File(inputFileName);
     const lines = () @trusted { return inputFile.byLine.map!(a => a.idup).array; }();
@@ -156,8 +161,7 @@ private TranslationText translationText(File)(in from!"dpp.runtime.options".Opti
     auto nonModuleLines = lines.filter!(a => !isModuleLine(a));
     const includePaths = options.includePaths ~ inputFileName.dirName;
     auto includes = nonModuleLines.map!(a => getHeaderName(a, includePaths)).filter!(a => a != "");
-    char[1024] tmpnamBuf;
-    const includesFileName = () @trusted { return cast(string) tmpnam(&tmpnamBuf[0]).fromStringz; }();
+    const includesFileName = getTempFileName();
     auto language = Language.C;
     // write a temporary file with all #included files in it
     () @trusted {
@@ -172,7 +176,7 @@ private TranslationText translationText(File)(in from!"dpp.runtime.options".Opti
        We remember the cursors already seen so as to not try and define
        something twice (legal in C, illegal in D).
     */
-    auto context = Context(options.indent, language);
+    auto context = Context(options.dup, language);
 
     // parse all #includes at once and populate context with
     // D definitions
@@ -184,6 +188,20 @@ private TranslationText translationText(File)(in from!"dpp.runtime.options".Opti
 }
 
 // write the original D code that doesn't need translating
+private void writeUndefLines(in string inputFileName, ref from!"std.stdio".File outputFile)
+    @trusted
+{
+    import std.stdio: File;
+    import std.algorithm: filter, canFind;
+
+    auto lines = File(inputFileName).byLine.filter!(l => l.canFind("#undef"));
+    foreach(line; lines) {
+        outputFile.writeln(line);
+    }
+}
+
+
+// write the original D code that doesn't need translating
 private void writeDlangLines(in string inputFileName, ref from!"std.stdio".File outputFile)
     @trusted
 {
@@ -193,31 +211,46 @@ private void writeDlangLines(in string inputFileName, ref from!"std.stdio".File 
     import std.algorithm: filter;
 
     foreach(line; File(inputFileName).byLine.filter!(a => !isModuleLine(a))) {
-        if(getHeaderName(line) == "")
+        if(getHeaderName(line) == "") {
             // not an #include directive, just pass through
             outputFile.writeln(line);
-        // otherwise do nothing
+        }   // otherwise do nothing
     }
 }
 
-bool isModuleLine(in const(char)[] line) @safe pure {
+private bool isModuleLine(in const(char)[] line) @safe pure {
     import std.string: stripLeft;
     import std.algorithm: startsWith;
     return line.stripLeft.startsWith("module ");
 }
 
-
-private void runCPreProcessor(in string tmpFileName, in string outputFileName) @safe {
+private void runCPreProcessor(in string cppPath, in string tmpFileName, in string outputFileName) @safe {
 
     import std.exception: enforce;
-    import std.process: execute;
+    import std.process: execute, Config;
     import std.conv: text;
     import std.string: join, splitLines;
     import std.stdio: File;
     import std.algorithm: filter, startsWith;
 
-    const cppArgs = ["cpp", tmpFileName];
-    const ret = execute(cppArgs);
+    version (Windows)
+        enum cppDefault = "clang-cpp";
+    else
+        enum cppDefault = "cpp";
+
+    const cpp = cppPath == "" ? cppDefault : cppPath;
+
+    const cppArgs = [cpp, tmpFileName];
+    const ret = () {
+        try {
+            string[string] env;
+            return execute(cppArgs, env, Config.stderrPassThrough);
+        } catch (Exception e)
+        {
+            import std.typecons : Tuple;
+            return Tuple!(int, "status", string, "output")(-1, e.msg);
+        }
+    }();
     enforce(ret.status == 0, text("Could not run `", cppArgs.join(" "), "`:\n", ret.output));
 
     {
@@ -232,7 +265,6 @@ private void runCPreProcessor(in string tmpFileName, in string outputFileName) @
             outputFile.writeln(line);
         }
     }
-
 }
 
 
@@ -274,11 +306,11 @@ string preamble() @safe pure {
                 T* ptr;
             }
 
-            // FIXME - crashes if T is passed by value (which we want)
+            // dmd bug causes a crash if T is passed by value.
+            // Works fine with ldc.
             static auto move(T)(ref T value) {
                 return Move!T(&value);
             }
-
 
             mixin template EnumD(string name, T, string prefix) if(is(T == enum)) {
 

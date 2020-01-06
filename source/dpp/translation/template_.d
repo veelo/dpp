@@ -43,6 +43,7 @@ private string[] translateSpecialisedTemplateParamsFinite(
     import std.range: iota;
     import std.array: array, join;
     import std.typecons: No;
+    import std.conv: text;
 
     // get the original list of template parameters and translate them
     // e.g. template<bool, bool, typename> -> (bool V0, bool V1, T)
@@ -68,6 +69,12 @@ private string[] translateSpecialisedTemplateParamsFinite(
 
         if(templateArgType.isVolatileQualified)
             throw new UntranslatableException(errorMsg(`volatile`));
+
+        if(index > translatedTemplateParams.length)
+            throw new UntranslatableException(
+                text("template index (",
+                     index, ") larger than parameter length:\n",
+                     translatedTemplateParams));
 
         string ret = translatedTemplateParams[index];  // e.g. `T`,  `bool V0`
         const maybeSpecialisation = translateTemplateParamSpecialisation(cursor.type, templateArgType, index, context);
@@ -115,7 +122,7 @@ private auto translateSpecialisedTemplateParamsVariadic(in from!"clang".Cursor c
 
 // In the case cursor is a partial or full template specialisation,
 // check to see if `maybeSpecialisation` can be converted to the
-// indexth template parater of the cursor's original template.
+// indexth template parameter of the cursor's original template.
 // If it can, then it's a value of that type.
 private bool isValueOfType(
     in from!"clang".Cursor cursor,

@@ -16,7 +16,7 @@ struct Options {
     enum usage = "Usage: d++ [options] [D compiler options] <filename.dpp> [D compiler args]";
 
     string[] dppFileNames;
-    string indentation;
+    int indentation;
     bool debugOutput;
     string[] includePaths;
     bool keepPreCppFiles;
@@ -33,9 +33,14 @@ struct Options {
     bool detailedUntranslatable;
     string[] ignoredNamespaces;
     string[] ignoredCursors;
+    bool ignoreSystemPaths;
+    string[] ignoredPaths;
+    string[string] prebuiltHeaders;
     bool alwaysScopedEnums;
     string cppStandard = "c++17";
     string[] clangOptions;
+    bool noSystemHeaders;
+    string cppPath;
 
     this(string[] args) {
 
@@ -79,7 +84,8 @@ struct Options {
             parseAsCpp = true;
         }
 
-        includePaths = systemPaths ~ includePaths;
+        if (!noSystemHeaders)
+            includePaths = systemPaths ~ includePaths;
     }
 
     string[] dFileNames() @safe pure const {
@@ -95,6 +101,8 @@ struct Options {
 
     private void parseArgs(ref string[] args) {
         import std.getopt: getopt, defaultGetoptPrinter, config;
+        import std.algorithm : map;
+        import std.array : split, join;
         auto helpInfo =
             getopt(
                 args,
@@ -112,11 +120,18 @@ struct Options {
                 "ignore-macros", "Ignore preprocessor macros", &ignoreMacros,
                 "ignore-ns", "Ignore a C++ namespace", &ignoredNamespaces,
                 "ignore-cursor", "Ignore a C++ cursor", &ignoredCursors,
+                "ignore-path", "Ignore a file path, note it globs so you will want to use *", &ignoredPaths,
+                "ignore-system-paths", "Adds system paths to the ignore-paths list (you can add them back individually with --include-path)", &ignoreSystemPaths,
+                "prebuilt-header", "Declare a #include can be safely replaced with import. You should also ignore-path to prevent retranslating the file", &prebuiltHeaders,
                 "detailed-untranslatables", "Show details about untranslatable cursors", &detailedUntranslatable,
                 "scoped-enums", "Don't redeclare enums to mimic C", &alwaysScopedEnums,
                 "c++-standard", "The C++ language standard (e.g. \"c++14\")", &cppStandard,
                 "clang-option", "Pass option to libclang", &clangOptions,
+                "no-sys-headers", "Don't include system headers by default", &noSystemHeaders,
+                "cpp-path", "Path to the C preprocessor executable", &cppPath,
             );
+
+        clangOptions = map!(e => e.split(" "))(clangOptions).join();
 
         if(helpInfo.helpWanted) {
             () @trusted {
@@ -124,20 +139,37 @@ struct Options {
             }();
             earlyExit = true;
         }
+
+        if(ignoreSystemPaths) {
+            import clang: systemPaths;
+            import std.algorithm: filter, canFind;
+            foreach(sp; systemPaths.filter!(p => !includePaths.canFind(p)))
+                ignoredPaths ~= sp ~ "*";
+        }
     }
 
-    Options indent() pure nothrow const {
+    void indent() @safe pure nothrow {
+        indentation += 4;
+    }
+
+    Options dup() @safe pure nothrow const {
         Options ret;
         foreach(i, ref elt; ret.tupleof) {
             static if(__traits(compiles, this.tupleof[i].dup))
                 elt = this.tupleof[i].dup;
+            else static if(is(typeof(this.tupleof[i]) == const(K[V]), K, V))
+            {
+                try // surprised looping over the AA is not nothrow but meh
+                foreach(k, v; this.tupleof[i])
+                    elt[k] = v;
+                catch(Exception) assert(0);
+            }
             else
                 elt = this.tupleof[i];
         }
 
         ret.includePaths = includePaths.dup;
         ret.defines = defines.dup;
-        ret.indentation = indentation ~ "    ";
 
         return ret;
     }
@@ -146,10 +178,20 @@ struct Options {
         version(unittest) import unit_threaded.io: writeln = writelnUt;
         else import std.stdio: writeln;
 
-        version(unittest) enum shouldLog = true;
-        else             const shouldLog = debugOutput;
+        version(unittest)
+            enum shouldLog = true;
+        else
+            const shouldLog = debugOutput;
 
         if(shouldLog)
-            debug writeln(indentation, args);
+            writeln(indentationString, args);
+    }
+
+    private auto indentationString() @safe pure nothrow const {
+        import std.array: appender;
+        auto app = appender!(char[]);
+        app.reserve(indentation);
+        foreach(i; 0 .. indentation) app ~= " ";
+        return app.data;
     }
 }

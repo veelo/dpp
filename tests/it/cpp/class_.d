@@ -331,3 +331,254 @@ import it;
         ),
    );
 }
+
+
+@("virtual.base")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Class {
+                public:
+                    virtual void pureVirtualFunc() = 0;
+                    virtual void virtualFunc();
+                    void normalFunc();
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Class == class), "Class is not a class");
+            }
+        ),
+    );
+}
+
+
+@("virtual.child.override.normal")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Base {
+                public:
+                    virtual void pureVirtualFunc() = 0;
+                    virtual void virtualFunc();
+                    void normalFunc();
+                };
+
+                class Derived: public Base {
+                public:
+                    void pureVirtualFunc() override;
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Base == class), "Base is not a class");
+                static assert(is(Derived == class), "Derived is not a class");
+                static assert(is(Derived: Base), "Derived is not a child class of Base");
+
+                auto d = new Derived;
+                d.pureVirtualFunc;
+            }
+        ),
+    );
+}
+
+
+@("virtual.child.override.final")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                struct A {
+                    virtual bool has() const noexcept { return false; }
+                };
+
+                struct B: A {
+                    void foo();
+                };
+
+                struct C: B {
+                    bool has() const noexcept final { return  true; }
+                };
+            }
+        ),
+        D(
+            q{
+                auto c = new C();
+                const bool res = c.has;
+            }
+        ),
+    );
+}
+
+
+@("virtual.child.empty.normal")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Base {
+                public:
+                    virtual void virtualFunc();
+                    void normalFunc();
+                };
+
+                class Derived: public Base {
+                public:
+
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Base == class), "Base is not a class");
+                static assert(is(Derived == class), "Derived is not a class");
+                static assert(is(Derived: Base), "Derived is not a child class of Base");
+
+                auto d = new Derived;
+                d.virtualFunc;
+                d.normalFunc;
+            }
+        ),
+    );
+}
+
+
+@("virtual.child.empty.template")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                template<typename T>
+                class Base {
+                public:
+                    virtual void virtualFunc();
+                    void normalFunc();
+                };
+
+                class Derived: public Base<int> {
+                public:
+
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Derived == class), "Derived is not a class");
+                static assert(is(Derived: Base!int), "Derived is not a child class of Base");
+
+                auto d = new Derived;
+                d.virtualFunc;
+                d.normalFunc;
+            }
+        ),
+    );
+}
+
+
+
+@("virtual.dtor")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Class {
+                public:
+                    virtual ~Class();
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Class == class), "Class is not a class");
+            }
+        ),
+    );
+}
+
+
+@("virtual.opAssign")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Class {
+                public:
+                    virtual ~Class();
+                    Class& operator=(const Class&);
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Class == class), "Class is not a class");
+            }
+        ),
+    );
+}
+
+
+@("ctor.default")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Base {
+                public:
+                    virtual ~Base();
+                    Base() = default;
+                    // the presence of the move ctor caused the compiler to fail with
+                    // "cannot implicitly generate a default constructor"
+                    // because the default ctor was ignored
+                    Base(Base&&) = default;
+                };
+
+                class Derived: public Base {
+                    virtual void func();
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Base == class), "Base is not a class");
+                static assert(is(Derived == class), "Derived is not a class");
+                static assert(is(Derived: Base), "Derived is not a child class of Base");
+            }
+        ),
+    );
+}
+
+
+@("ctor.using")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                class Base {
+                public:
+                    Base(int i);
+                    Base(const Base&) = delete;
+                    Base(Base&&) = delete;
+                    virtual ~Base();
+                };
+
+                class Derived: public Base {
+                    using Base::Base;
+                };
+            }
+        ),
+        D(
+            q{
+                static assert(is(Base == class), "Base is not a class");
+                static assert(is(Derived == class), "Derived is not a class");
+                static assert(is(Derived: Base), "Derived is not a child class of Base");
+
+                auto d = new Derived(42);
+            }
+        ),
+        ["--hard-fail"],
+    );
+}

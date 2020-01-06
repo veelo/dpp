@@ -27,11 +27,14 @@ string translateTopLevelCursor(in from!"clang".Cursor cursor,
 
 private bool skipTopLevel(in from!"clang".Cursor cursor,
                           in from!"dpp.runtime.context".Context context)
-    @safe pure
+    @safe
 {
     import dpp.translation.aggregate: isAggregateC;
     import clang: Cursor;
     import std.algorithm: startsWith, canFind;
+
+    if(context.isFromIgnoredPath(cursor))
+        return true;
 
     // We want to ignore anonymous structs and unions but not enums. See #54
     if(cursor.spelling == "" && cursor.kind == Cursor.Kind.EnumDecl)
@@ -164,7 +167,15 @@ void debugCursor(in from!"clang".Cursor cursor,
     }
 }
 
+
 Translator[from!"clang".Cursor.Kind] translators() @safe {
+    static Translator[from!"clang".Cursor.Kind] ret;
+    if(ret == ret.init) ret = translatorsImpl;
+    return ret;
+}
+
+
+private Translator[from!"clang".Cursor.Kind] translatorsImpl() @safe pure {
     import dpp.translation;
     import clang: Cursor;
 
@@ -219,7 +230,7 @@ Translator[from!"clang".Cursor.Kind] translators() @safe {
             FieldDecl:                          &translateField,
             TypedefDecl:                        &translateTypedef,
             MacroDefinition:                    &translateMacro,
-            InclusionDirective:                 &ignore,
+            InclusionDirective:                 &translateInclude,
             EnumConstantDecl:                   &translateEnumConstant,
             VarDecl:                            &translateVariable,
             UnexposedDecl:                      &translateUnexposed,
@@ -241,10 +252,20 @@ Translator[from!"clang".Cursor.Kind] translators() @safe {
             FunctionTemplate:                   &translateFunction,
             // For ParmDecl, see it.cpp.opaque.std::function
             ParmDecl:                           &ignore,
+            CXXBaseSpecifier:                   &ignore,
+            UsingDeclaration:                   &translateInheritingConstructor,
         ];
     }
 }
 
+string[] translateInclude(in from!"clang".Cursor cursor,
+                          ref from!"dpp.runtime.context".Context context)
+    @safe
+{
+    if(auto ptr = cursor.spelling in context.options.prebuiltHeaders)
+        return ["import " ~ *ptr ~ ";"];
+    return null;
+}
 
 // if this translated line can't be valid D code
 bool untranslatable(in string line) @safe pure {
@@ -257,7 +278,6 @@ bool untranslatable(in string line) @safe pure {
         || line.canFind("variant!")
         || line.canFind("value _ ")
         || line.canFind("enable_if_c")
-        || line.canFind(`}))`)  // ???
         || line.canFind(`(this_)_M_t._M_equal_range_tr(`)
         || line.canFind(`this-`)
         || line.canFind("_BoundArgs...")

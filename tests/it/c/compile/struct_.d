@@ -300,3 +300,45 @@ import it;
         )
     );
 }
+
+@("const anonymous struct as field")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct A {
+                    const struct {
+                        int version;
+                        int other;
+                    } version;
+                };
+            }
+        ),
+        D(
+            q{
+                A a = { version_ : { version_ : 13, other : 7 } };
+            }
+        )
+    );
+}
+
+@("Pointer to pointer to undeclared struct should result in a struct declaration")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct A {
+                    const struct B** p;
+                };
+
+                void f(struct C***);
+            }
+        ),
+        D(
+            q{
+                B *ptrB;
+                C *ptrC;
+            }
+        )
+    );
+}

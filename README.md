@@ -1,7 +1,9 @@
 d++ - #include C and C++ headers in D files
 ====================================================
 
-| [![Build Status](https://travis-ci.org/atilaneves/dpp.png?branch=master)](https://travis-ci.org/atilaneves/dpp) | [![Coverage](https://codecov.io/gh/atilaneves/dpp/branch/master/graph/badge.svg)](https://codecov.io/gh/atilaneves/dpp) |
+[![Build Status](https://travis-ci.org/atilaneves/dpp.png?branch=master)](https://travis-ci.org/atilaneves/dpp)
+[![Build Status](https://ci.appveyor.com/api/projects/status/github/atilaneves/dpp?branch=master&svg=true)](https://ci.appveyor.com/project/atilaneves/dpp)
+[![Coverage](https://codecov.io/gh/atilaneves/dpp/branch/master/graph/badge.svg)](https://codecov.io/gh/atilaneves/dpp)
 [![Open on run.dlang.io](https://img.shields.io/badge/run.dlang.io-open-blue.svg)](https://run.dlang.io/is/JK0CAf)
 
 Goal
@@ -53,15 +55,31 @@ $ 30
 
 [![Open on run.dlang.io](https://img.shields.io/badge/run.dlang.io-open-blue.svg)](https://run.dlang.io/is/WwpvhT)
 
+C++ support
+-----------
+
+C++ support is currently limited. Including any header from the C++
+standard library is unlikely to work.  Simpler headers might, the
+probability rising with how similar the C++ dialect used is to
+C. Despite that, dpp currently does try to translate classes,
+templates and operator overloading. It's unlikely to work on
+production headers without judicious use of the `--ignore-cursor` and
+`--ignore-namespace` command-line options.  When using these, the user
+can then define their own versions of problematic declarations such as
+`std::vector`.
+
 Limitations
 -----------
 
-* It currently only supports C features, but C++ is planned.
-* Using it on a C++ header will "work" if it's basically technically C, with `extern(C++)` instead of `extern(C)`
-* Only known to work on Linux with libclang.so.6.0. It might work in different conditions.
-* When used on multiple files, there might be problems with duplicate definitions depending on imports. This will be fixed.
+* Only known to work on Linux with libclang versions 6 and up. It might work in different conditions.
+* When used on multiple files, there might be problems with duplicate definitions depending on imports.
+  It is recommended to put all `#include`s in one `.dpp` file and import the resulting D module.
+* Not currently able to translate Linux kernel headers.
 
-This is alpha software. It has however produced programs that compile that #included several "real-life" C headers:
+Success stories
+--------------
+
+Known project headers whose translations produce D code that compiles:
 
 * nanomsg/nn.h, nanomsg/pubsub.h
 * curl/curl.h
@@ -74,6 +92,7 @@ This is alpha software. It has however produced programs that compile that #incl
 * openssl/ssl.h
 * imapfilter.h
 * libetpan/libetpan.h
+* Python.h
 
 Compilation however doesn't guarantee they work as expected and YMMV. Please consult the examples.
 
@@ -106,7 +125,7 @@ the file to be included with libclang, loops over the definitions of data struct
 therein and expands in-place the relevant D translations. e.g. if a header contains:
 
 ```c
-uint16_t foo(uin32_t a);
+uint16_t foo(uint32_t a);
 ```
 
 The output file will contain:
@@ -125,12 +144,8 @@ C API requires the preprocessor to use properly. It is possible to mimic this us
 with enums and CTFE, but the result is not guaranteed to be the same. The only way to use a
 C or C++ API as it was intended is by leveraging the preprocessor.
 
-This means that only the #including .dpp file has access to constant
-macros, and any D module importing the .d file resulting from said
-.dpp file won't see those constants (e.g. `#define THE_ANSWER 42`).
-To mitigate this, dpp will introduce an `enum` for any macros that are
-string or integer constants but with the `DPP_ENUM_` prefix. To see why,
-please consult [github issue 103](https://github.com/atilaneves/dpp/issues/103).
+Trivial literal macros however(e.g. `#define THE_ANSWER 42`) are translated as
+D enums.
 
 As a final pass before writing the output D file, d++ will run the C
 preprocessor (currently the cpp binary installed on the system) on the
@@ -224,3 +239,20 @@ Becomes:
 pragma(mangle, "debug")
 void debug_(const(char)*);
 ```
+
+
+Build Instructions
+------------------
+
+### Windows
+
+1. Install http://releases.llvm.org/6.0.1/LLVM-6.0.1-win64.exe into `C:\Program Files\LLVM\`, making sure to tick the "Add LLVM to the system PATH for all users" option.
+2. Make sure you have [LDC](https://github.com/ldc-developers/ldc/releases) installed somewhere.
+3. Compile with `dub build --compiler=C:\path\to\bin\ldc2.exe`.
+4. Copy `C:\Program Files\LLVM\bin\libclang.dll` next to the `d++.exe` in the `bin` directory.
+
+### Ubuntu
+
+1. Install `libclang-6.0-dev` with apt
+2. `dub install dpp`
+3. `dub run dpp -- yoursourcefilenamehere.dpp`

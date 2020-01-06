@@ -22,14 +22,8 @@ string[] translateFunction(in from!"clang".Cursor cursor,
     )
     do
 {
-    import dpp.translation.dlang: maybeRename, maybePragma;
+    import dpp.translation.dlang: maybePragma;
     import dpp.translation.aggregate: maybeRememberStructs;
-    import dpp.translation.type: translate;
-    import clang: Cursor, Type;
-    import std.array: join, array;
-    import std.conv: text;
-    import std.algorithm: any, endsWith, canFind;
-    import std.typecons: Yes;
 
     if(ignoreFunction(cursor)) return [];
 
@@ -39,7 +33,8 @@ string[] translateFunction(in from!"clang".Cursor cursor,
 
     string[] lines;
 
-    lines ~= maybeCopyCtor(cursor, context);
+    // FIXME: this breaks with dmd 2.086.0 due to D's copy ctor
+    //lines ~= maybeCopyCtor(cursor, context);
     lines ~= maybeOperator(cursor, context);
 
     // never declared types might lurk here
@@ -57,6 +52,7 @@ string[] translateFunction(in from!"clang".Cursor cursor,
 }
 
 private bool ignoreFunction(in from!"clang".Cursor cursor) @safe {
+    import dpp.translation.aggregate: dKeywordFromStrass;
     import clang: Cursor, Type, Token;
     import std.algorithm: countUntil, any, canFind, startsWith;
 
@@ -64,10 +60,12 @@ private bool ignoreFunction(in from!"clang".Cursor cursor) @safe {
     if(cursor.semanticParent.kind == Cursor.Kind.ClassTemplatePartialSpecialization)
         return true;
 
+    const tokens = cursor.tokens;
+
     // C++ deleted functions
-    const deleteIndex = cursor.tokens.countUntil(Token(Token.Kind.Keyword, "delete"));
+    const deleteIndex = tokens.countUntil(Token(Token.Kind.Keyword, "delete"));
     if(deleteIndex != -1 && deleteIndex > 1) {
-        if(cursor.tokens[deleteIndex - 1] == Token(Token.Kind.Punctuation, "="))
+        if(tokens[deleteIndex - 1] == Token(Token.Kind.Punctuation, "="))
             return true;
     }
 
@@ -78,7 +76,6 @@ private bool ignoreFunction(in from!"clang".Cursor cursor) @safe {
 
         // If it has a body, we check that its tokens contain "::" in the right place
 
-        const tokens = cursor.tokens;
         const doubleColonIndex = tokens.countUntil(Token(Token.Kind.Punctuation, "::"));
 
         if(doubleColonIndex != -1) {
@@ -92,10 +89,27 @@ private bool ignoreFunction(in from!"clang".Cursor cursor) @safe {
         }
     }
 
-    // FIXME - no default contructors for structs in D
-    // We're not even checking if it's a struct here, so classes are being
-    // affected for no reason.
-    if(cursor.kind == Cursor.Kind.Constructor && numParams(cursor) == 0) return true;
+    // No default contructors for structs in D
+    if(
+        cursor.kind == Cursor.Kind.Constructor
+        && numParams(cursor) == 0
+        && dKeywordFromStrass(cursor.semanticParent) == "struct"
+    )
+        return true;
+
+    // Ignore C++ methods definitions outside of the class
+    // The lexical parent only differs from the semantic parent
+    // in this case.
+    if(
+        // the constructor type is for issue 115 test on Windows.
+        // it didn't trigger the check above because the CompoundStmts
+        // are not present on the Windows builds of libclang for
+        // template member functions (reason unknown)
+        // but this check appears to do the right thing anyway.
+        (cursor.kind == Cursor.Kind.CXXMethod || cursor.kind == Cursor.Kind.Constructor)
+        && cursor.semanticParent != cursor.lexicalParent
+    )
+        return true;
 
     return false;
 }
@@ -110,6 +124,7 @@ private string functionDecl(
 {
     import dpp.translation.template_: translateTemplateParams;
     import dpp.translation.exception: UntranslatableException;
+    import dpp.clang: isOverride, isFinal;
     import std.conv: text;
     import std.algorithm: endsWith, canFind;
     import std.array: join;
@@ -136,7 +151,29 @@ private string functionDecl(
     if(ctParams != "" && spelling.canFind("("))
         throw new UntranslatableException("BUG with templated operators");
 
-    return text(returnType, " ", spelling, ctParams, "(", params, ") @nogc nothrow", const_, ";");
+    string prefix() {
+        import dpp.translation.aggregate: dKeywordFromStrass;
+
+        if(cursor.semanticParent.dKeywordFromStrass == "struct")
+            return "";
+
+        if(cursor.isPureVirtual)
+            return "abstract ";
+
+        if(!cursor.isVirtual)
+            return "final ";
+
+        // If we get here it's a virtual member function.
+        // We might need to add D `final` and/or `override`.
+        string ret;
+
+        if(cursor.isOverride) ret ~= "override ";
+        if(cursor.isFinal) ret ~= "final ";
+
+        return ret;
+    }
+
+    return text(prefix, returnType, " ", spelling, ctParams, "(", params, ") @nogc nothrow", const_, ";");
 }
 
 private string returnType(in from!"clang".Cursor cursor,
@@ -188,14 +225,22 @@ private string[] maybeOperator(in from!"clang".Cursor cursor,
 }
 
 private bool isSupportedOperatorInD(in from!"clang".Cursor cursor) @safe nothrow {
+    import dpp.translation.aggregate: dKeywordFromStrass;
     import clang: Cursor;
     import std.algorithm: map, canFind;
 
     if(!isOperator(cursor)) return false;
+
     // No D support for free function operator overloads
     if(cursor.semanticParent.kind == Cursor.Kind.TranslationUnit) return false;
 
     const cppOperator = cursor.spelling[OPERATOR_PREFIX.length .. $];
+
+    // FIXME - should only check for identity assignment,
+    // not all assignment operators
+    if(dKeywordFromStrass(cursor.semanticParent) == "class" && cppOperator == "=")
+        return false;
+
     const unsupportedSpellings = [`!`, `,`, `&&`, `||`, `->`, `->*`];
     if(unsupportedSpellings.canFind(cppOperator)) return false;
 
@@ -550,4 +595,35 @@ private string blob(in from!"clang".Type type,
     }
 
     return "";
+}
+
+
+string[] translateInheritingConstructor(
+    in from!"clang".Cursor cursor,
+    ref from!"dpp.runtime.context".Context context
+    )
+    @safe
+    in(cursor.kind == from!"clang".Cursor.Kind.UsingDeclaration)
+{
+    import clang: Cursor;
+    import std.algorithm: find, all;
+    import std.array: empty, front;
+
+    auto overloaded = cursor.children.find!(a => a.kind == Cursor.Kind.OverloadedDeclRef);
+    if(overloaded.empty) return [];
+
+    const allCtors = overloaded
+        .front
+        .children
+        .all!(a => a.kind == Cursor.Kind.Constructor)
+        ;
+
+    if(!allCtors) return [];
+
+    return [
+        `this(_Args...)(auto ref _Args args) {`,
+        `    import std.functional: forward;`,
+        `    super(forward!args);`,
+        `}`,
+    ];
 }

@@ -5,6 +5,7 @@ module it.issues;
 
 import it;
 
+version(Posix) // because Windows doesn't have signinfo
 @Tags("issue")
 @("3")
 @safe unittest {
@@ -94,7 +95,7 @@ import it;
 
 
 @Tags("issue", "bitfield")
-@("7")
+@("7.0")
 @safe unittest {
     shouldCompile(
         C(
@@ -122,6 +123,31 @@ import it;
         ),
     );
 }
+
+@Tags("issue", "bitfield")
+@("7.1")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct other {
+                    int a: 2;
+                    int b: 3;
+                    // field type of pointer to undeclared struct should not
+                    // affect the generated bitfields' syntax
+                    struct A *ptr;
+                };
+            }
+        ),
+        D(
+            q{
+                other o;
+            }
+        ),
+    );
+}
+
+
 
 @Tags("issue")
 @("10")
@@ -225,9 +251,8 @@ import it;
     );
 }
 
-@ShouldFail
 @Tags("issue", "preprocessor")
-@("22.3")
+@("22.2")
 @safe unittest {
     shouldCompile(
         C(
@@ -247,7 +272,7 @@ import it;
 }
 
 @Tags("issue", "preprocessor")
-@("22.4")
+@("22.3")
 @safe unittest {
     shouldCompile(
         C(
@@ -421,6 +446,39 @@ import it;
         ),
     );
 }
+
+@Tags("issue")
+@("29.4")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct Struct {
+                    union {
+                        int a;
+                        struct {
+                            int b;
+                            union {
+                                int c;
+                                char d;
+                            };
+                        };
+                    };
+                };
+            }
+        ),
+        D(
+            q{
+                Struct s;
+                s.a = 42;
+                s.b = 1337;
+                s.c = 7;
+                s.d = 'D';
+            }
+        ),
+    );
+}
+
 
 
 @Tags("issue")
@@ -596,6 +654,7 @@ import it;
     }
 }
 
+
 @Tags("issue")
 @("43")
 @safe unittest {
@@ -737,6 +796,7 @@ import it;
 }
 
 
+version(linux) // linux specific header in the test
 @Tags("issue")
 @("66")
 @safe unittest {
@@ -803,16 +863,18 @@ unittest {
                           `
                               #include "2nd.h"
                               #define BAR 33
+                              // before the BAR macro, BAR is 42. After, it's 33.
                           `,
                           D(""), // no need for .dpp source code
         );
         writeFile("2nd.h",
                   `
-                      // these empty lines are important, since they push the enum
+                      // These empty lines are important, since they push the enum
                       // declaration down to have a higher line number than the BAR macro.
+                      // The bug had to do with ordering.
                       enum TheEnum { BAR = 42 };
                   `);
-        run("-c", inSandboxPath("app.dpp"));
+        run("-c", inSandboxPath("app.dpp"), "--keep-pre-cpp-files");
     }
 }
 
@@ -1036,11 +1098,18 @@ unittest {
 @Tags("issue")
 @("101")
 @safe unittest {
+    // SO tells me the standard insists upon unsigned long long
+    // and apparently so does MSVC... but linux doesn't. idk why.
+    // see: https://stackoverflow.com/a/16596909/1457000
+    version(Windows)
+        string type = "unsigned long long";
+    else
+        string type = "unsigned long";
     shouldCompile(
         Cpp(
             q{
                 // normally without the underscore
-                int operator "" _s(const wchar_t* __str, unsigned long __len);
+                int operator "" _s(const wchar_t* __str, } ~ type ~ q{ __len);
             }
         ),
         D(
@@ -1064,7 +1133,7 @@ unittest {
         writeFile("app.d",
                   q{
                       import hdr;
-                      static assert(DPP_ENUM_CONSTANT == 42);
+                      static assert(CONSTANT == 42);
                   });
 
         runPreprocessOnly("hdr.dpp");
@@ -1086,14 +1155,65 @@ unittest {
         writeFile("app.d",
                   q{
                       import hdr;
-                      import std.conv: text;
-                      static assert(DPP_ENUM_OCTAL == 127);
+                      static assert(OCTAL == 127);
                   });
 
         runPreprocessOnly("hdr.dpp");
         shouldCompile("app.d");
     }
 }
+
+
+@Tags("issue")
+@("103.2")
+@safe unittest {
+    with(immutable IncludeSandbox()) {
+        writeFile("hdr.h",
+                  "#define STRING \"foobar\"\n");
+        writeFile("hdr.dpp",
+                  `
+                      #include "hdr.h"
+                  `);
+        writeFile("app.d",
+                  q{
+                      import hdr;
+                      static assert(STRING == "foobar");
+                  });
+
+        runPreprocessOnly("hdr.dpp");
+        shouldCompile("app.d");
+    }
+}
+
+
+@Tags("issue")
+@("103.3")
+@safe unittest {
+    with(immutable IncludeSandbox()) {
+        writeFile("hdr.h",
+                  `
+                      #define BASE 5
+                      #define OPT0 (BASE * 16 + 0)
+                      #define OPT1 (BASE * 16 + 1)
+                  `
+        );
+        writeFile("hdr.dpp",
+                  `
+                      #include "hdr.h"
+                  `);
+        writeFile("app.d",
+                  q{
+                      import hdr;
+                      static assert(BASE == 5);
+                      static assert(OPT0 == 80);
+                      static assert(OPT1 == 81);
+                  });
+
+        runPreprocessOnly("hdr.dpp");
+        shouldCompile("app.d");
+    }
+}
+
 
 
 @ShouldFail
@@ -1532,4 +1652,124 @@ unittest {
             }
         ),
    );
+}
+
+@Tags("issue")
+@("168")
+// @("gcc.__extention__")
+// Examples:
+//    /usr/include/netinet/in.h
+//    /usr/include/x86_64-linux-gnu/bits/cpu-set.h
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define FOO(bar) {__extension__({bar;})
+            `
+        ),
+        D(
+            q{
+            }
+        )
+    );
+}
+
+
+@Tags("issue")
+@("172")
+@safe unittest {
+    shouldCompile(
+        Cpp(
+            q{
+                struct virtual_base {
+                    virtual_base() = default;
+                    virtual ~virtual_base() = default;
+                    virtual_base(virtual_base&&) = default;
+                    virtual_base(const virtual_base&) = default;
+                    virtual_base& operator=(virtual_base&&) = default;
+                    virtual_base& operator=(const virtual_base&) = default;
+                };
+            }
+        ),
+        D(
+            q{
+            }
+        )
+    );
+}
+
+
+@HiddenTest("Needs the cl_platform.h header on the machine")
+@Tags("issue")
+@("175")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+#include "CL/cl_platform.h"
+            `
+        ),
+        D(
+            q{
+            }
+        )
+    );
+}
+
+
+@Tags("issue")
+@("207")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define FOO 1
+                #define BAR 2
+                #define BAZ 4
+                #define ALL ( \
+                    FOO | \
+                    BAR | \
+                    BAZ \
+                )
+            `
+        ),
+        D(
+            q{
+                static assert(ALL == 7);
+            }
+        )
+    );
+}
+
+
+version(Linux) {
+    @Tags("issue")
+        @("229.0")
+        @safe unittest {
+        with(immutable IncludeSandbox()) {
+            writeFile(`app.dpp`,
+                      `
+                          module foo.linux.bar;
+                      `
+            );
+            runPreprocessOnly("app.dpp");
+            shouldNotCompile("app.d");
+        }
+    }
+
+
+    @Tags("issue")
+        @("229.1")
+        @safe unittest {
+        with(immutable IncludeSandbox()) {
+            writeFile(`app.dpp`,
+                      `
+                          #undef linux
+                          module foo.linux.bar;
+                      `
+            );
+            runPreprocessOnly("app.dpp");
+            shouldCompile("app.d");
+        }
+    }
 }

@@ -3,8 +3,9 @@ import std.array: join;
 import std.typecons: Yes, No;
 
 enum debugFlags = ["-w", "-g", "-debug"];
+enum releaseFlags = ["-O", "-inline", "-release"];
 
-//alias exe = dubDefaultTarget!(CompilerFlags(debugFlags));
+alias exe = dubDefaultTarget!(CompilerFlags(releaseFlags));
 
 alias lib = dubConfigurationTarget!(
     Configuration("library"),
@@ -20,12 +21,6 @@ enum mainObj = objectFile(
     ImportPaths("source")
 );
 
-alias exe = dubLink!(
-    TargetName("d++"),
-    Configuration("library"),
-    targetConcat!(lib, mainObj)
-);
-
 alias utOld = dubTestTarget!(
     CompilerFlags(debugFlags),
     LinkerFlags(),
@@ -36,7 +31,7 @@ alias utOld = dubTestTarget!(
 //     Configuration("unittest"),
 //     targetConcat!(lib, testObjs, dubDependencies!(Configuration("unittest"))),
 // );
-alias ut = dubTestTarget!(
+alias all_tests = dubTestTarget!(
     CompilerFlags(debugFlags),
 );
 
@@ -96,10 +91,23 @@ alias utl = dubLink!(
 );
 
 
+alias it = dubConfigurationTarget!(
+    Configuration("integration"),
+    CompilerFlags(debugFlags ~ "-unittest"),
+);
+
+
+alias ct = dubConfigurationTarget!(
+    Configuration("contract"),
+    CompilerFlags(debugFlags ~ "-unittest"),
+);
+
 
 mixin build!(
     exe,
-    optional!ut,  // investigate UT failures
+    optional!all_tests,
+    optional!it,
+    optional!ct,
     optional!utl,  // fast development
     optional!utlPerPackage,  // for benchmarking
     optional!dpp2,

@@ -8,12 +8,25 @@ targetType "executable"
 targetPath "bin"
 targetName "d++"
 dflags "-dip25"
-lflags "-L/usr/lib/llvm-6.0/lib"  # for Travis CI
+lflags "-L/usr/local/clang-7.0.0/lib" platform="posix"  # for Travis CI
 
-dependency "libclang" version="~>0.1.1"
+dependency "libclang" version="~>0.2.0"
 dependency "sumtype"  version="~>0.7.1"
 
 versions "SumTypeNoDefaultCtor"
+
+
+buildType "release" {
+    buildOptions "releaseMode" "optimize" "inline" "debugInfo"
+}
+
+buildType "profilec" {
+    buildOptions "profile" "releaseMode" "optimize" "inline" "debugInfo"
+}
+
+buildType "profile-gc" {
+    buildOptions "profileGC" "releaseMode" "optimize" "inline" "debugInfo"
+}
 
 
 configuration "executable" {
@@ -30,17 +43,39 @@ configuration "library" {
 
 
 configuration "unittest" {
-    targetName "ut"
+    targetName "all_tests"
     mainSourceFile "tests/test_main.d"
-    sourcePaths "source" "tests"
-    importPaths "source" "tests"
+    sourcePaths "tests"
+    importPaths "tests"
+    excludedSourceFiles "source/main.d" "tests/contract/main.d" "tests/it/main.d"
+    dependency "unit-threaded" version="*"
+}
+
+
+configuration "integration" {
+    targetName "it"
+    mainSourceFile "tests/it/main.d"
+    sourcePaths "tests/it" "tests/common"
+    importPaths "tests"
+
+    excludedSourceFiles "source/main.d"
+    dependency "unit-threaded" version="*"
+}
+
+
+configuration "contract" {
+    targetName "ct"
+    mainSourceFile "tests/contract/main.d"
+    sourcePaths "tests/contract" "tests/common"
+    importPaths "tests"
+
     excludedSourceFiles "source/main.d"
     dependency "unit-threaded" version="*"
 }
 
 
 configuration "dpp2" {
-    targetNAme "dpp2"
+    targetName "dpp2"
     mainSourceFile "tests/test_main.d"
     sourcePaths "dpp2/source" "dpp2/tests" "tests"
     importPaths "dpp2/source" "dpp2/tests" "tests"

@@ -5,6 +5,23 @@ module it.c.compile.projects;
 
 import it;
 
+@("multicharacter_literal")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define test 'ABCD'
+            `
+        ),
+
+        D(
+            q{
+                static assert(test == 1094861636); // determined by printf("%d\n", 'ABCD'); in C
+            }
+        )
+    );
+}
+
 @("nn_get_statistic")
 @safe unittest {
     shouldCompile(
@@ -23,6 +40,42 @@ import it;
                 int s;
                 int stat;
                 my_uint64_t ret = nn_get_statistic(s, stat);
+            }
+        )
+    );
+}
+
+@("Lstring literals (seen in Windows)")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define test L"testing"
+            `
+        ),
+
+        D(
+            q{
+                wstring s = test;
+            }
+        )
+    );
+}
+
+@("lowercase integer suffices")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define test 100l
+                #define test2 100ll
+            `
+        ),
+
+        D(
+            q{
+                auto t = test;
+                auto t2 = test2;
             }
         )
     );
@@ -762,6 +815,123 @@ import it;
             q{
                 handler_t handler;
                 bool b = handler(42, 33.3);
+            }
+        ),
+    );
+}
+
+@("(unsigned) long long C suffixes")
+@safe unittest {
+    shouldCompile(
+        C(
+            `
+                #define A 1LL
+                #define B 2ll
+                #define C 3LLU
+                #define D 4LLu
+                #define E 5llU
+                #define F 6llu
+                #define G 7ULL
+                #define H 8Ull
+                #define I 9uLL
+                #define J 10ull
+            `
+        ),
+        D(
+            q{
+                auto a = A;
+                auto b = B;
+                auto c = C;
+                auto d = D;
+                auto e = E;
+                auto f = F;
+                auto g = G;
+                auto h = H;
+                auto i = I;
+                auto j = J;
+            }
+        ),
+    );
+}
+
+@("Accessing nested aggregates")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                struct A {
+                    struct B {
+                        int a;
+                        struct C {
+                            int b;
+                            enum E {Mon, Tue};
+                        } c_obj1;
+                    } b_obj;
+
+                    union U {
+                        int v1;
+                        char v2;
+                    };
+
+                    struct C c_obj2;
+                };
+
+                void f(struct C *);
+                void g(struct B *);
+                void h(union U *);
+                void i(enum E);
+            }
+        ),
+        D(
+            q{
+                A a_obj;
+                a_obj.b_obj.c_obj1.b = 3;
+
+                A.B.C.E day = A.B.C.E.Mon;
+            }
+        ),
+    );
+}
+
+@("C preprocessor warnings should not be written to file")
+@safe unittest {
+
+    with(immutable IncludeSandbox()) {
+
+        writeFile("hdr.h",
+                  `
+                  #define A B(__VA_ARGS__)
+                  `);
+
+        writeFile("app.dpp",
+                  `
+                      #include "hdr.h"
+                  `);
+
+        runPreprocessOnly("app.dpp");
+        shouldCompile("app.d");
+    }
+}
+
+
+@("Extern void variable")
+@safe unittest {
+    shouldCompile(
+        C(
+            q{
+                extern void v;
+                extern const void cv;
+            }
+        ),
+        D(
+            q{
+                static assert(is(typeof(v) == void*),
+                              "Expected void*, not " ~
+                              typeof(v).stringof);
+
+                static assert(is(typeof(cv) == const(void*)),
+                              "Expected const(void*), not " ~
+                              typeof(cv).stringof);
             }
         ),
     );

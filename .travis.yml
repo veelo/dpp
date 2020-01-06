@@ -1,27 +1,32 @@
 language: d
 sudo: false
-dist: xenial
+dist: bionic
+
 
 matrix:
   include:
     - d: dmd-nightly
-    - d: dmd-2.085.0
+    - d: dmd-2.088.1
+    - d: dmd-2.087.1
   allow_failures:
     - d: dmd-nightly
 
 
 addons:
   apt:
-    sources:
-      - ubuntu-toolchain-r-test
     packages:
-      - libclang-6.0-dev
-      - g++-7
+      - libclang-dev
+      - g++
 
 
 install:
   - gem install bundler -v 1.17.3
   - bundle install
+
+
+env:
+  global:
+    - LD_RUN_PATH=/usr/local/clang-7.0.0/lib
 
 
 script:

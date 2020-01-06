@@ -36,12 +36,7 @@ private string[] translateStrass(in from!"clang".Cursor cursor,
                                  ref from!"dpp.runtime.context".Context context,
                                  in string cKeyword)
     @safe
-    in(
-        cursor.kind == from!"clang".Cursor.Kind.StructDecl ||
-        cursor.kind == from!"clang".Cursor.Kind.ClassDecl ||
-        cursor.kind == from!"clang".Cursor.Kind.ClassTemplate ||
-        cursor.kind == from!"clang".Cursor.Kind.ClassTemplatePartialSpecialization
-    )
+  in(isStrass(cursor))
   do
 {
     import dpp.translation.template_: templateSpelling, translateTemplateParams,
@@ -65,9 +60,42 @@ private string[] translateStrass(in from!"clang".Cursor cursor,
         return Nullable!string();
     }
 
-    const dKeyword = "struct";
+    const dKeyword = dKeywordFromStrass(cursor);
 
     return translateAggregate(context, cursor, cKeyword, dKeyword, spelling);
+}
+
+
+private bool isStrass(in from!"clang".Cursor cursor) @safe @nogc pure nothrow {
+    return
+        cursor.kind == from!"clang".Cursor.Kind.StructDecl ||
+        cursor.kind == from!"clang".Cursor.Kind.ClassDecl ||
+        cursor.kind == from!"clang".Cursor.Kind.ClassTemplate ||
+        cursor.kind == from!"clang".Cursor.Kind.ClassTemplatePartialSpecialization
+        ;
+}
+
+
+// Decide on whether to emit a D struct or class
+package string dKeywordFromStrass(in from!"clang".Cursor cursor) @safe nothrow {
+    import dpp.clang: baseClasses;
+    import clang: Cursor;
+    import std.algorithm: any, map, filter;
+    import std.range: walkLength;
+
+    static bool hasVirtuals(in Cursor cursor) {
+        return cursor.children.any!(a => a.isVirtual);
+    }
+
+    static bool anyVirtualInAncestry(in Cursor cursor) @safe nothrow {
+        if(hasVirtuals(cursor)) return true;
+
+        return cursor.baseClasses.any!anyVirtualInAncestry;
+    }
+
+    return anyVirtualInAncestry(cursor)
+        ? "class"
+        : "struct";
 }
 
 
@@ -142,6 +170,8 @@ string[] translateAggregate(
     @safe
 {
     import dpp.translation.translation: translate;
+    import dpp.translation.type: hasAnonymousSpelling;
+    import dpp.runtime.context: Language;
     import clang: Cursor, Type, AccessSpecifier;
     import std.algorithm: map;
     import std.array: array;
@@ -153,7 +183,9 @@ string[] translateAggregate(
     const realDlangKeyword = cursor.semanticParent.type.canonical.kind == Type.Kind.Record
         ? "static " ~ dKeyword
         : dKeyword;
-    const firstLine = realDlangKeyword ~ ` ` ~ name;
+    const parents = maybeParents(cursor, context, dKeyword);
+    const enumBaseType = maybeEnumBaseType(cursor, dKeyword);
+    const firstLine = realDlangKeyword ~ ` ` ~ name ~ parents ~ enumBaseType;
 
     if(!cursor.isDefinition) return [firstLine ~ `;`];
 
@@ -181,17 +213,22 @@ string[] translateAggregate(
             continue;
         }
 
+        if(skipMember(child)) continue;
+
         lines ~= bitFieldInfo.handle(child);
 
-        if(skipMember(child)) continue;
+        if (context.language == Language.C
+                && (child.type.kind == Type.Kind.Record || child.type.kind == Type.Kind.Enum)
+                && !child.type.hasAnonymousSpelling)
+            context.rememberAggregateParent(child, cursor);
 
         const childTranslation = () {
 
             if(isPrivateField(child, context))
                 return translatePrivateMember(child);
 
-            if(child.kind == Cursor.Kind.CXXBaseSpecifier)
-                return translateBase(i, child, context);
+            if(child.kind == Cursor.Kind.CXXBaseSpecifier && dKeyword == "struct")
+                return translateStructBase(i, child, context);
 
             return translate(child, context);
         }();
@@ -342,6 +379,7 @@ private bool skipMember(in from!"clang".Cursor member) @safe @nogc pure nothrow 
         && member.kind != Cursor.Kind.CXXBaseSpecifier
         && member.kind != Cursor.Kind.ConversionFunction
         && member.kind != Cursor.Kind.FunctionTemplate
+        && member.kind != Cursor.Kind.UsingDeclaration
     ;
 }
 
@@ -391,6 +429,18 @@ string[] translateBitField(in from!"clang".Cursor cursor,
     return [text("    ", type, `, "`, spelling, `", `, cursor.bitWidth, `,`)];
 }
 
+private from!"clang".Type pointeeTypeFor(in from!"clang".Type type)
+    @safe
+{
+    import clang: Type;
+
+    Type pointeeType = type.pointee.canonical;
+    while (pointeeType.kind == Type.Kind.Pointer)
+        pointeeType = pointeeType.pointee.canonical;
+
+    return pointeeType;
+}
+
 // C allows elaborated types to appear in function parameters and member declarations
 // if they're pointers and doesn't require a declaration for the referenced type.
 private void maybeRememberStructsFromType(in from!"clang".Type type,
@@ -400,7 +450,7 @@ private void maybeRememberStructsFromType(in from!"clang".Type type,
     import clang: Type;
     import std.range: only, chain;
 
-    const pointeeType = type.pointee.canonical;
+    const pointeeType = pointeeTypeFor(type);
     const isFunction =
         pointeeType.kind == Type.Kind.FunctionProto ||
         pointeeType.kind == Type.Kind.FunctionNoProto;
@@ -424,10 +474,10 @@ void maybeRememberStructs(R)(R types, ref from!"dpp.runtime.context".Context con
     import std.algorithm: map, filter;
 
     auto structTypes = types
-        .filter!(a => a.kind == Type.Kind.Pointer && a.pointee.canonical.kind == Type.Kind.Record)
-        .map!(a => a.pointee.canonical);
+        .filter!(a => a.kind == Type.Kind.Pointer && pointeeTypeFor(a).kind == Type.Kind.Record)
+        .map!(a => pointeeTypeFor(a));
 
-    void rememberStruct(in Type pointeeCanonicalType) {
+    void rememberStruct(scope const Type pointeeCanonicalType) @safe {
         import dpp.translation.type: translateElaborated;
         import std.array: replace;
         import std.algorithm: canFind;
@@ -449,7 +499,7 @@ void maybeRememberStructs(R)(R types, ref from!"dpp.runtime.context".Context con
             ? removeConst.replace("volatile ", "")
             : removeConst;
 
-        context.rememberFieldStruct(translateElaborated(removeVolatile));
+        context.rememberFieldStruct(translateElaborated(removeVolatile, context));
     }
 
     foreach(structType; structTypes)
@@ -479,10 +529,17 @@ private string[] maybeC11AnonymousRecords(in from!"clang".Cursor cursor,
     if(member.type.kind != Type.Kind.Record || member.spelling != "") return [];
 
     // Either a field or an array of the type we expect
-    bool isFieldOfRightType(in Cursor member, in Cursor child) {
+    static bool isFieldOfRightType(in Cursor member, in Cursor child) {
         const isField =
             child.kind == Cursor.Kind.FieldDecl &&
-            child.type.canonical == member.type.canonical;
+            (child.type.canonical == member.type.canonical ||
+                // If the inner struct declaration is 'const struct {...} X;',
+                // then child.type.canonical would be:
+                // Type(Elaborated, "const struct (anonymous struct at fileY)"),
+                // and member.type.canonical would be:
+                // Type(Record, "struct ParentStruct::(anonymous at fileY)").
+                // This is the reason why we unelaborate the child.type.
+                child.type.unelaborate == member.type.canonical);
 
         const isArrayOf = child.type.elementType.canonical == member.type.canonical;
         return isField || isArrayOf;
@@ -500,32 +557,41 @@ private string[] maybeC11AnonymousRecords(in from!"clang".Cursor cursor,
     const dtype = translate(member.type, context);
     lines ~= "    " ~ dtype ~ " " ~  varName ~ ";";
 
-    foreach(subMember; member.children) {
-        if(subMember.kind == Cursor.Kind.FieldDecl)
-            lines ~= innerFieldAccessors(varName, subMember);
-        else if(subMember.type.canonical.kind == Type.Kind.Record &&
-                hasAnonymousSpelling(subMember.type.canonical) &&
-                !member.children.any!(a => isFieldOfRightType(subMember, a))) {
-            foreach(subSubMember; subMember) {
-                lines ~= "        " ~ innerFieldAccessors(varName, subSubMember);
+    static string[] subMemberAccessors(in Cursor member,
+                                       in string varName,
+                                       ref from!"dpp.runtime.context".Context context) {
+        string[] res;
+        foreach(subMember; member.children) {
+            if(subMember.kind == Cursor.Kind.FieldDecl)
+                res ~= innerFieldAccessors(varName, subMember, context);
+            else if(subMember.type.canonical.kind == Type.Kind.Record &&
+                    hasAnonymousSpelling(subMember.type.canonical) &&
+                    !member.children.any!(a => isFieldOfRightType(subMember, a))) {
+                res ~= subMemberAccessors(subMember, varName, context);
             }
         }
+        return res;
     }
+
+    lines ~= subMemberAccessors(member, varName, context);
 
     return lines;
 }
 
 
 // functions to emulate C11 anonymous structs/unions
-private string[] innerFieldAccessors(in string varName, in from !"clang".Cursor subMember) @safe {
+private string[] innerFieldAccessors(in string varName,
+                                     in from !"clang".Cursor subMember,
+                                     ref from!"dpp.runtime.context".Context context) @safe {
     import std.format: format;
     import std.algorithm: map;
     import std.array: array;
 
     string[] lines;
 
-    const fieldAccess = varName ~ "." ~ subMember.spelling;
-    const funcName = subMember.spelling;
+    const subMemberSpelling = context.spelling(subMember.spelling);
+    const fieldAccess = varName ~ "." ~ subMemberSpelling;
+    const funcName = subMemberSpelling;
 
     lines ~= q{auto %s() @property @nogc pure nothrow { return %s; }}
         .format(funcName, fieldAccess);
@@ -598,9 +664,9 @@ private string[] maybeDisableDefaultCtor(in from!"clang".Cursor cursor, in strin
 }
 
 
-private string[] translateBase(size_t index,
-                               in from!"clang".Cursor cursor,
-                               ref from!"dpp.runtime.context".Context context)
+private string[] translateStructBase(size_t index,
+                                     in from!"clang".Cursor cursor,
+                                     ref from!"dpp.runtime.context".Context context)
     @safe
     in(cursor.kind == from!"clang".Cursor.Kind.CXXBaseSpecifier)
 do
@@ -627,4 +693,43 @@ do
         : [];
 
     return fieldDecl ~ maybeAliasThis;
+}
+
+
+private string maybeParents(
+    in from!"clang".Cursor cursor,
+    ref from!"dpp.runtime.context".Context context,
+    in string dKeyword)
+    @safe
+{
+    import dpp.translation.type: translate;
+    import clang: Cursor;
+    import std.typecons: No;
+    import std.algorithm: filter, map;
+    import std.array: join;
+
+    if(dKeyword != "class") return "";
+
+    auto parents = cursor
+        .children
+        .filter!(a => a.kind == Cursor.Kind.CXXBaseSpecifier)
+        .map!(a => translate(a.type, context, No.translatingFunction))
+        ;
+
+    return parents.empty
+        ? ""
+        : ": " ~ parents.join(", ");
+}
+
+private string maybeEnumBaseType(in from!"clang".Cursor cursor, in string dKeyword)
+    @safe
+{
+    import std.algorithm: map, minElement, maxElement;
+
+    if(dKeyword != "enum") return "";
+
+    auto enumValues = cursor.children.map!(a => a.enumConstantValue);
+    bool shouldPromote = enumValues.maxElement > int.max || enumValues.minElement < int.min;
+
+    return shouldPromote ? " : long" : "";
 }
